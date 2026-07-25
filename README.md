@@ -134,9 +134,11 @@ Note: The `.env` file is ignored by git for security purposes.
 
 ---
 
-## 📜 License
+## 📜 License & Copyright
 
-This project is licensed under the MIT License - Copyright (c) 2026 Altay. See the [LICENSE](LICENSE) file for details.
+**Copyright © 2026 Altay. All rights reserved.**
+
+This software and its source code are proprietary. Unauthorized copying, modification, distribution, or commercial use of this file, via any medium, is strictly prohibited.
 
 ---
 
