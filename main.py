@@ -1,4 +1,7 @@
 # main.py
+import sys
+import os
+import uvicorn
 import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -15,9 +18,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def get_resource_path(relative_path):
+    """ PyInstaller ile paketlendiğinde geçici klasör yolunu, normal çalışmada yerel yolu bulur """
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
+
 @app.get("/", response_class=HTMLResponse)
 async def get_index():
-    with open("index.html", "r", encoding="utf-8") as f:
+    html_path = get_resource_path("index.html")
+    with open(html_path, "r", encoding="utf-8") as f:
         return f.read()
 
 @app.websocket("/ws/orbit/{norad_id}")
@@ -47,3 +57,7 @@ async def websocket_constellation(websocket: WebSocket, group_name: str):
         pass
     except Exception as e:
         print(f"WS Constellation Error: {e}")
+
+# .exe olarak çift tıklandığında sunucuyu otomatik başlatacak blok:
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8000)
