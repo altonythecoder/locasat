@@ -102,7 +102,7 @@ class ConstellationTracker:
 
         for url in urls:
             try:
-                res = requests.get(url, headers=headers, timeout=25)
+                res = requests.get(url, headers=headers, timeout=60)
                 if res.status_code == 200 and len(res.text) > 200:
                     sats = self._parse_tle_lines(res.text.splitlines())
                     if sats:
