@@ -1,7 +1,6 @@
 # sat_tracker.py
 import os
 import requests
-from datetime import timedelta
 from skyfield.api import load, wgs84, EarthSatellite
 from dotenv import load_dotenv
 
@@ -17,7 +16,7 @@ FALLBACK_ISS_TLE = (
 )
 
 class SatelliteTracker:
-    """Tekli uydu detay takibi ve gecit tahmin motoru."""
+    """Single satellite detailed tracking and pass prediction engine."""
     def __init__(self, norad_id: int):
         self.norad_id = norad_id
         self.ts = load.timescale(builtin=True)
@@ -44,7 +43,7 @@ class SatelliteTracker:
         station = wgs84.latlon(station_lat, station_lon)
         topocentric = (self.satellite - station).at(now)
         alt, az, distance = topocentric.altaz()
-        
+
         return {
             "satellite_name": self.satellite.name,
             "norad_id": self.norad_id,
@@ -59,7 +58,9 @@ class SatelliteTracker:
 
 
 class ConstellationTracker:
-    """Coklu LEO Filolari ve Takimyildiz Takip Motoru."""
+    """Multi LEO Fleets and Constellation Tracking Engine."""
+    _tle_cache = {}  # Prevents slowdowns by caching CelesTrak API requests
+
     def __init__(self, group_name: str = "starlink"):
         self.ts = load.timescale(builtin=True)
         self.group_name = group_name.lower()
@@ -68,7 +69,7 @@ class ConstellationTracker:
     def _parse_tle_lines(self, lines: list[str]) -> list[EarthSatellite]:
         sats = []
         clean_lines = [l.strip() for l in lines if l.strip()]
-        
+
         i = 0
         while i < len(clean_lines) - 1:
             if clean_lines[i].startswith("1 ") and clean_lines[i+1].startswith("2 "):
@@ -89,12 +90,17 @@ class ConstellationTracker:
         return sats
 
     def _fetch_from_celestrak(self) -> list[EarthSatellite]:
+        # If data was previously fetched, retrieve directly from cache
+        if self.group_name in ConstellationTracker._tle_cache:
+            return ConstellationTracker._tle_cache[self.group_name]
+
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        
+
+        # Fast CelesTrak TLE endpoint routes
         if self.group_name == "starlink":
-            urls = ["https://celestrak.org/NORAD/elements/supplemental/sup-gp.php?FILE=starlink&FORMAT=tle"]
+            urls = ["https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle"]
         elif self.group_name == "oneweb":
-            urls = ["https://celestrak.org/NORAD/elements/supplemental/sup-gp.php?FILE=oneweb&FORMAT=tle"]
+            urls = ["https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=tle"]
         elif self.group_name == "active":
             urls = ["https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle"]
         else:
@@ -102,41 +108,40 @@ class ConstellationTracker:
 
         for url in urls:
             try:
-                res = requests.get(url, headers=headers, timeout=60)
+                # Timeout set to 15s to prevent freezes
+                res = requests.get(url, headers=headers, timeout=15)
                 if res.status_code == 200 and len(res.text) > 200:
                     sats = self._parse_tle_lines(res.text.splitlines())
                     if sats:
+                        ConstellationTracker._tle_cache[self.group_name] = sats
                         return sats
             except Exception as e:
-                print(f"⚠️ CelesTrak Baglanti Hatasi ({url}): {e}")
+                print(f"⚠️ CelesTrak Connection Error ({url}): {e}")
 
         return []
 
     def _fetch_all_tles(self) -> list[EarthSatellite]:
-        # Eğer grup 'active' ise, CelesTrak'in genel listesi yerine 
-        # sadece LEO filolarını birleştirerek çek
         if self.group_name == "active":
             sats = []
             for grp in ["starlink", "oneweb", "stations", "iridium-NEXT"]:
                 self.group_name = grp
                 sats.extend(self._fetch_from_celestrak())
-            self.group_name = "active" # Loglama için ismi geri düzelt
+            self.group_name = "active"
         else:
             sats = self._fetch_from_celestrak()
 
-        # Eğer hala uydu yoksa ve grup 'stations' değilse istasyonları çek (Fallback)
         if not sats and self.group_name != "stations":
             self.group_name = "stations"
             sats = self._fetch_from_celestrak()
 
-        print(f"🚀 TOPLAM {len(sats)} ADET AKTIF UYDU MOTORUNA YUKLENDI! [{self.group_name.upper()}]")
+        print(f"🚀 TOTAL {len(sats)} ACTIVE SATELLITES LOADED TO ENGINE! [{self.group_name.upper()}]")
         return sats
-        
+
     def get_compact_telemetries(self) -> list[list]:
         now = self.ts.now()
         results = []
         subpoint_fn = wgs84.subpoint
-        
+
         for sat in self.satellites:
             try:
                 sub = subpoint_fn(sat.at(now))
