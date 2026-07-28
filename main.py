@@ -4,12 +4,11 @@ import os
 import uvicorn
 import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sat_tracker import SatelliteTracker, ConstellationTracker
 
-app = FastAPI(title="Global LEO Satellite Tracker GCS", version="2.0.0")
+app = FastAPI(title="locaSAT GCS", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,7 +19,6 @@ app.add_middleware(
 )
 
 def get_resource_path(relative_path):
-    """ Returns the temporary folder path when packaged with PyInstaller, or the local path during normal execution """
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
@@ -40,30 +38,65 @@ async def favicon():
 async def websocket_single_orbit(websocket: WebSocket, norad_id: int):
     await websocket.accept()
     tracker = SatelliteTracker(norad_id)
+    sim_time_iso = None
+
+    async def listen_time_updates():
+        nonlocal sim_time_iso
+        try:
+            while True:
+                data = await websocket.receive_json()
+                if "sim_time" in data:
+                    val = data.get("sim_time")
+                    if val is None or val == "null" or val == "":
+                        sim_time_iso = None
+                    else:
+                        sim_time_iso = val
+        except Exception:
+            pass
+
+    listen_task = asyncio.create_task(listen_time_updates())
+
     try:
         while True:
-            telemetry = tracker.get_current_telemetry()
+            telemetry = tracker.get_current_telemetry(sim_time_iso=sim_time_iso)
             await websocket.send_json(telemetry)
-            await asyncio.sleep(0.8)
+            await asyncio.sleep(0.2)  # Fast 5Hz telemetry stream for high time-rate accuracy
     except WebSocketDisconnect:
         pass
-    except Exception as e:
-        print(f"WS Single Error: {e}")
+    finally:
+        listen_task.cancel()
 
 @app.websocket("/ws/constellation/{group_name}")
 async def websocket_constellation(websocket: WebSocket, group_name: str):
     await websocket.accept()
     tracker = ConstellationTracker(group_name)
+    sim_time_iso = None
+
+    async def listen_time_updates():
+        nonlocal sim_time_iso
+        try:
+            while True:
+                data = await websocket.receive_json()
+                if "sim_time" in data:
+                    val = data.get("sim_time")
+                    if val is None or val == "null" or val == "":
+                        sim_time_iso = None
+                    else:
+                        sim_time_iso = val
+        except Exception:
+            pass
+
+    listen_task = asyncio.create_task(listen_time_updates())
+
     try:
         while True:
-            telemetries = tracker.get_compact_telemetries()
+            telemetries = tracker.get_compact_telemetries(sim_time_iso=sim_time_iso)
             await websocket.send_json(telemetries)
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.2)  # Fast 5Hz telemetry stream for high time-rate accuracy
     except WebSocketDisconnect:
         pass
-    except Exception as e:
-        print(f"WS Constellation Error: {e}")
+    finally:
+        listen_task.cancel()
 
-# Block to automatically start the server when double-clicked as .exe:
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000, use_colors=False, log_config=None)
