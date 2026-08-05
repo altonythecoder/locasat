@@ -3,7 +3,6 @@
 ![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11-38bdf8.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-00a393.svg)
-![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 A highly responsive, real-time 3D Space Domain Awareness (SDA) platform designed to track Low Earth Orbit (LEO) constellations. Built with a high-performance Python backend and a WebGL frontend, **locaSAT** visualizes major satellite fleets including Starlink, OneWeb, Iridium NEXT, Planet Labs, and the ISS with 60 FPS smooth interpolation using SGP4 orbital mechanics.
 
