@@ -120,6 +120,9 @@
             box-shadow: 0 0 15px rgba(0, 243, 255, 0.4);
             backdrop-filter: blur(8px); line-height: 1.5;
         }
+        @media (max-width: 1500px) {
+            #timePanel { left: auto; right: 20px; transform: none; }
+        }
     </style>
 </head>
 <body>
@@ -128,7 +131,7 @@
 <div id="tooltip"></div>
 
 <div id="timePanel">
-    <div id="timeDisplay">🕒 2026-07-28 21:02:48 UTC (LIVE)</div>
+    <div id="timeDisplay">🕒 -- UTC (LIVE)</div>
     <div class="time-controls">
         <button id="btn_rate_-240" onclick="changeTimeRate(-240)" title="Rewind 240x">⏪ -240x</button>
         <button id="btn_rate_-120" onclick="changeTimeRate(-120)" title="Rewind 120x">⏪ -120x</button>
@@ -192,6 +195,10 @@
         <p>Latitude: <span id="lat" class="val">-</span>°</p>
         <p>Longitude: <span id="lon" class="val">-</span>°</p>
         <p>Altitude: <span id="alt" class="val">-</span> km</p>
+        <p>Azimuth: <span id="az" class="val">-</span>°</p>
+        <p>Elevation: <span id="el" class="val">-</span>°</p>
+        <p>Range to Station: <span id="range" class="val">-</span> km</p>
+        <p>Visibility: <span id="visibility" class="val">-</span></p>
     </div>
     <p>Active Orbit Objects: <span id="activeCount" class="val">0</span></p>
     <p>System Status: <span id="status" class="status">Connecting...</span></p>
@@ -345,49 +352,80 @@
     // TIME TRAVEL & SPEED STATE MANAGEMENT
     let isLiveMode = true;
     let currentRate = 1;
+    let syncInterval = null;
+
+    function getSimState() {
+        if (isLiveMode) return { sim_time: null, rate: 1, paused: false };
+        return {
+            sim_time: Cesium.JulianDate.toIso8601(viewer.clock.currentTime, 3),
+            rate: currentRate,
+            paused: !viewer.clock.shouldAnimate
+        };
+    }
+
+    function sendToServer(payload) {
+        if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+            activeSocket.send(JSON.stringify(payload));
+        }
+    }
+
+    function syncTimeToServer() {
+        sendToServer(getSimState());
+    }
+
+    function syncStationToServer() {
+        if (!currentStation) return;
+        sendToServer({ station: currentStation });
+    }
 
     function resetInterpolationBuffers() {
-        satStates = [];
-        if (singleEntity && positionProperty) {
-            positionProperty = new Cesium.SampledPositionProperty();
-            positionProperty.forwardExtrapolationType = Cesium.ExtrapolationType.EXTRAPOLATE;
-            singleEntity.position = positionProperty;
-            singleEntity.orientation = new Cesium.VelocityOrientationProperty(positionProperty);
+        satFrame = null;
+        if (positionProperty) {
+            positionProperty.removeSamples(new Cesium.TimeInterval({
+                start: Cesium.JulianDate.fromIso8601("1900-01-01T00:00:00Z"),
+                stop: Cesium.JulianDate.fromIso8601("2200-01-01T00:00:00Z")
+            }));
         }
     }
 
     function updateTimeButtonUI() {
         const buttons = document.querySelectorAll('.time-controls button');
         buttons.forEach(btn => btn.classList.remove('active'));
+        document.getElementById('pauseBtn').innerText = viewer.clock.shouldAnimate ? "⏸️ Pause" : "▶️ Resume";
 
         if (isLiveMode) {
             document.getElementById('liveBtn').classList.add('active');
         } else if (!viewer.clock.shouldAnimate) {
             document.getElementById('pauseBtn').classList.add('active');
         } else {
-            const btnId = `btn_rate_${currentRate}`;
-            const targetBtn = document.getElementById(btnId);
+            const targetBtn = document.getElementById(`btn_rate_${currentRate}`);
             if (targetBtn) targetBtn.classList.add('active');
         }
     }
 
     function changeTimeRate(multiplier) {
+        if (isLiveMode) {
+            viewer.clock.currentTime = Cesium.JulianDate.now();
+        }
         currentRate = multiplier;
         isLiveMode = false;
-        viewer.clock.shouldAnimate = true;
         viewer.clock.multiplier = multiplier;
+        viewer.clock.shouldAnimate = true;
 
-        resetInterpolationBuffers();
         updateTimeButtonUI();
+        syncTimeToServer();
     }
 
     function togglePause() {
-        viewer.clock.shouldAnimate = !viewer.clock.shouldAnimate;
-        if (!viewer.clock.shouldAnimate) {
+        if (isLiveMode) {
+            viewer.clock.currentTime = Cesium.JulianDate.now();
             isLiveMode = false;
+            currentRate = 1;
+            viewer.clock.multiplier = 1;
         }
-        document.getElementById('pauseBtn').innerText = viewer.clock.shouldAnimate ? "⏸️ Pause" : "▶️ Resume";
+        viewer.clock.shouldAnimate = !viewer.clock.shouldAnimate;
         updateTimeButtonUI();
+        syncTimeToServer();
     }
 
     function resetToLiveTime() {
@@ -396,40 +434,31 @@
         viewer.clock.currentTime = Cesium.JulianDate.now();
         viewer.clock.multiplier = 1;
         viewer.clock.shouldAnimate = true;
-        document.getElementById('pauseBtn').innerText = "⏸️ Pause";
 
         resetInterpolationBuffers();
         updateTimeButtonUI();
-
-        if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
-            activeSocket.send(JSON.stringify({ sim_time: null }));
-        }
+        syncTimeToServer();
     }
 
     // CLOCK HUD TICKER & WEBSOCKET SYNC
-    let syncInterval = null;
-    viewer.clock.onTick.addEventListener(() => {
+    viewer.clock.onTick.addEventListener((clock) => {
         if (isLiveMode) {
-            viewer.clock.currentTime = Cesium.JulianDate.now();
+            clock.currentTime = Cesium.JulianDate.now();
         }
-        const isoString = Cesium.JulianDate.toIso8601(viewer.clock.currentTime);
+        const isoString = Cesium.JulianDate.toIso8601(clock.currentTime, 0);
         const dateStr = isoString.substring(0, 10);
         const timeStr = isoString.substring(11, 19);
-        document.getElementById('timeDisplay').innerText = `🕒 ${dateStr} ${timeStr} UTC ${isLiveMode ? '(LIVE)' : ''}`;
+        let suffix = '(LIVE)';
+        if (!isLiveMode) suffix = clock.shouldAnimate ? `(${currentRate > 0 ? '+' : ''}${currentRate}x)` : '(PAUSED)';
+        document.getElementById('timeDisplay').innerText = `🕒 ${dateStr} ${timeStr} UTC ${suffix}`;
     });
 
     function startWsTimeSync() {
         if (syncInterval) clearInterval(syncInterval);
-        syncInterval = setInterval(() => {
-            if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
-                if (isLiveMode) {
-                    activeSocket.send(JSON.stringify({ sim_time: null }));
-                } else {
-                    const currentSimIso = Cesium.JulianDate.toIso8601(viewer.clock.currentTime);
-                    activeSocket.send(JSON.stringify({ sim_time: currentSimIso }));
-                }
-            }
-        }, 150);
+        syncStationToServer();
+        syncTimeToServer();
+        // Periodic resync corrects any drift between the browser clock and the server's estimate
+        syncInterval = setInterval(syncTimeToServer, 1000);
     }
 
     function switchMapLayer() {
@@ -458,11 +487,14 @@
 
     // 🎯 GROUND STATION MANAGEMENT
     let stationEntity = null;
+    let currentStation = null;
 
     function setGroundStation(lat, lon, altMeters = 3170, name = "DAG (Eastern Anatolia Observatory)", flyTo = true) {
         if (stationEntity) {
             viewer.entities.remove(stationEntity);
         }
+        currentStation = { lat: lat, lon: lon, alt_m: altMeters };
+        syncStationToServer();
 
         stationEntity = viewer.entities.add({
             name: name,
@@ -537,22 +569,25 @@
         const alt = parseFloat(document.getElementById('customAlt').value) || 0;
         const name = document.getElementById('customName').value || "Custom Station";
 
-        if (isNaN(lat) || isNaN(lon)) {
+        if (isNaN(lat) || isNaN(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
             alert("Please enter a valid Latitude (-90 / 90) and Longitude (-180 / 180) value!");
             return;
         }
         setGroundStation(lat, lon, alt, name);
     }
 
-    // GPU POINT COLLECTION & SMOOTH INTERPOLATION
+    // GPU POINT COLLECTION & TIME-BASED INTERPOLATION
     let pointCollection = viewer.scene.primitives.add(new Cesium.PointPrimitiveCollection());
     let activeSocket = null;
     let singleEntity = null;
     let positionProperty = null;
+    let connectionId = 0;
     const tooltip = document.getElementById('tooltip');
 
-    let satStates = [];
-    let lastFrameTime = performance.now();
+    // Latest constellation frame: positions at t0 and t1, interpolated by the clock's current time
+    let satFrame = null;
+    let satNames = [];
+    const scratchPos = new Cesium.Cartesian3();
 
     const COLOR_GOLD = Cesium.Color.fromCssColorString('#ffd700');
     const COLOR_GREEN = Cesium.Color.fromCssColorString('#00ff66');
@@ -562,6 +597,10 @@
     const COLOR_BLUE = Cesium.Color.fromCssColorString('#38bdf8');
     const COLOR_WHITE = Cesium.Color.WHITE;
     const COLOR_BLACK = Cesium.Color.BLACK;
+
+    function escapeHtml(str) {
+        return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
 
     function getSatelliteStyle(name) {
         const uName = (name || "").toUpperCase();
@@ -586,67 +625,94 @@
 
     function clearAll() {
         pointCollection.removeAll();
-        satStates = [];
+        satFrame = null;
+        satNames = [];
         if (singleEntity) {
             viewer.entities.remove(singleEntity);
             singleEntity = null;
-            positionProperty = null;
         }
+        positionProperty = null;
         viewer.trackedEntity = null;
         tooltip.style.display = 'none';
     }
 
+    function closeActiveSocket() {
+        if (syncInterval) {
+            clearInterval(syncInterval);
+            syncInterval = null;
+        }
+        if (activeSocket) {
+            activeSocket.onopen = activeSocket.onmessage = activeSocket.onclose = activeSocket.onerror = null;
+            activeSocket.close();
+            activeSocket = null;
+        }
+    }
+
     function switchMode() {
-        if (activeSocket) activeSocket.close();
+        closeActiveSocket();
         clearAll();
+        connectionId++;
 
         const selectedMode = document.getElementById('modeSelect').value;
         document.getElementById('status').innerText = "🔄 Loading TLE Catalog...";
+        document.getElementById('activeCount').innerText = "0";
 
         if (selectedMode.startsWith("single_")) {
             const noradId = selectedMode.split("_")[1];
             document.getElementById('singleDetails').style.display = 'block';
-            connectSingleSatellite(noradId);
+            connectSingleSatellite(noradId, connectionId);
             updateFleetCard(noradId);
         } else if (selectedMode.startsWith("group_")) {
             const groupKey = selectedMode.replace("group_", "");
             document.getElementById('singleDetails').style.display = 'none';
-            connectConstellation(groupKey);
+            connectConstellation(groupKey, connectionId);
             updateFleetCard(groupKey);
         }
     }
 
-    // ⚡ SMOOTH CONSTELLATION INTERPOLATION
-    viewer.scene.preUpdate.addEventListener(() => {
-        if (!satStates.length) return;
-        const now = performance.now();
-        const elapsedSec = (now - lastFrameTime) / 1000.0;
-        const lerpFactor = Math.min(elapsedSec * 5.0, 1.0);
+    function scheduleReconnect(myId) {
+        document.getElementById('status').innerText = "🔴 Connection lost - reconnecting...";
+        setTimeout(() => {
+            if (myId === connectionId) switchMode();
+        }, 3000);
+    }
 
-        for (let i = 0; i < satStates.length; i++) {
-            const st = satStates[i];
-            if (!st || !st.targetPos) continue;
-
-            const pt = pointCollection.get(i);
-            if (!pt) continue;
-
-            Cesium.Cartesian3.lerp(st.currentPos, st.targetPos, lerpFactor, st.currentPos);
-            pt.position = st.currentPos;
+    // ⚡ CONSTELLATION INTERPOLATION (works for forward, rewind and pause)
+    viewer.scene.preUpdate.addEventListener((scene, time) => {
+        if (!satFrame) return;
+        const span = Cesium.JulianDate.secondsDifference(satFrame.t1, satFrame.t0);
+        let alpha = 0;
+        if (Math.abs(span) > 1e-6) {
+            alpha = Cesium.JulianDate.secondsDifference(time, satFrame.t0) / span;
+            alpha = Math.max(-1, Math.min(2, alpha));
+        }
+        const p0 = satFrame.p0, p1 = satFrame.p1, valid = satFrame.valid;
+        const n = Math.min(valid.length, pointCollection.length);
+        for (let i = 0; i < n; i++) {
+            if (!valid[i]) continue;
+            const k = i * 3;
+            scratchPos.x = p0[k] + (p1[k] - p0[k]) * alpha;
+            scratchPos.y = p0[k + 1] + (p1[k + 1] - p0[k + 1]) * alpha;
+            scratchPos.z = p0[k + 2] + (p1[k + 2] - p0[k + 2]) * alpha;
+            pointCollection.get(i).position = scratchPos;
         }
     });
 
     // SINGLE SATELLITE TRACKING WITH VELOCITY ORIENTATION LOCK
-    function connectSingleSatellite(noradId) {
+    function connectSingleSatellite(noradId, myId) {
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        activeSocket = new WebSocket(`${wsProtocol}//${window.location.host}/ws/orbit/${noradId}`);
+        const socket = new WebSocket(`${wsProtocol}//${window.location.host}/ws/orbit/${noradId}`);
+        activeSocket = socket;
 
-        activeSocket.onopen = () => {
+        socket.onopen = () => {
             document.getElementById('status').innerText = "🟢 Single Tracking Active";
             document.getElementById('activeCount').innerText = "1";
             startWsTimeSync();
         };
+        socket.onclose = () => scheduleReconnect(myId);
 
-        activeSocket.onmessage = (event) => {
+        socket.onmessage = (event) => {
+            if (myId !== connectionId) return;
             const telemetry = JSON.parse(event.data);
             const time = Cesium.JulianDate.fromIso8601(telemetry.timestamp_utc);
             const pos = Cesium.Cartesian3.fromDegrees(telemetry.longitude, telemetry.latitude, telemetry.altitude_km * 1000);
@@ -654,6 +720,7 @@
             if (!singleEntity) {
                 positionProperty = new Cesium.SampledPositionProperty();
                 positionProperty.forwardExtrapolationType = Cesium.ExtrapolationType.EXTRAPOLATE;
+                positionProperty.backwardExtrapolationType = Cesium.ExtrapolationType.EXTRAPOLATE;
 
                 singleEntity = viewer.entities.add({
                     name: telemetry.satellite_name,
@@ -667,70 +734,97 @@
                 viewer.trackedEntity = singleEntity;
             }
 
+            // Samples are exact positions for their timestamps, so old ones stay valid in any time direction.
+            // Only prune samples far away from the current window to bound memory.
+            const next = telemetry.next;
+            let windowSec = 120;
+            if (next) {
+                const nextTime = Cesium.JulianDate.fromIso8601(next.timestamp_utc);
+                windowSec = Math.max(120, Math.abs(Cesium.JulianDate.secondsDifference(nextTime, time)) * 40);
+                if (!Cesium.JulianDate.equals(nextTime, time)) {
+                    positionProperty.addSample(nextTime, Cesium.Cartesian3.fromDegrees(next.longitude, next.latitude, next.altitude_km * 1000));
+                }
+            }
             positionProperty.addSample(time, pos);
+            const farPast = Cesium.JulianDate.fromIso8601("1900-01-01T00:00:00Z");
+            const farFuture = Cesium.JulianDate.fromIso8601("2200-01-01T00:00:00Z");
+            positionProperty.removeSamples(new Cesium.TimeInterval({ start: farPast, stop: Cesium.JulianDate.addSeconds(time, -windowSec, new Cesium.JulianDate()) }));
+            positionProperty.removeSamples(new Cesium.TimeInterval({ start: Cesium.JulianDate.addSeconds(time, windowSec, new Cesium.JulianDate()), stop: farFuture }));
 
             document.getElementById('satName').innerText = telemetry.satellite_name;
-            document.getElementById('lat').innerText = telemetry.latitude;
-            document.getElementById('lon').innerText = telemetry.longitude;
-            document.getElementById('alt').innerText = telemetry.altitude_km;
+            document.getElementById('lat').innerText = telemetry.latitude.toFixed(4);
+            document.getElementById('lon').innerText = telemetry.longitude.toFixed(4);
+            document.getElementById('alt').innerText = telemetry.altitude_km.toFixed(2);
+            document.getElementById('az').innerText = telemetry.azimuth_deg.toFixed(2);
+            document.getElementById('el').innerText = telemetry.elevation_deg.toFixed(2);
+            document.getElementById('range').innerText = telemetry.distance_km.toFixed(0);
+            const visible = telemetry.elevation_deg > 0;
+            const visEl = document.getElementById('visibility');
+            visEl.innerText = visible ? "🟢 Above Horizon (AOS)" : "⚫ Below Horizon";
+            visEl.style.color = visible ? "#22c55e" : "#94a3b8";
         };
     }
 
     // FLEET STREAMING
-    function connectConstellation(groupName) {
+    function connectConstellation(groupName, myId) {
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        activeSocket = new WebSocket(`${wsProtocol}//${window.location.host}/ws/constellation/${groupName}`);
+        const socket = new WebSocket(`${wsProtocol}//${window.location.host}/ws/constellation/${encodeURIComponent(groupName)}`);
+        activeSocket = socket;
 
-        activeSocket.onopen = () => {
+        socket.onopen = () => {
             document.getElementById('status').innerText = `🟢 ${groupName.toUpperCase()} Stream Active`;
             startWsTimeSync();
         };
+        socket.onclose = () => scheduleReconnect(myId);
 
-        activeSocket.onmessage = (event) => {
-            const satArray = JSON.parse(event.data);
-            document.getElementById('activeCount').innerText = satArray.length;
+        socket.onmessage = (event) => {
+            if (myId !== connectionId) return;
+            const frame = JSON.parse(event.data);
+            const sats = frame.sats || [];
 
-            lastFrameTime = performance.now();
-
-            while (pointCollection.length < satArray.length) {
-                pointCollection.add({
-                    pixelSize: 5,
-                    color: COLOR_BLUE,
-                    show: true
-                });
-            }
-
-            for (let i = satArray.length; i < pointCollection.length; i++) {
-                pointCollection.get(i).show = false;
-            }
-
-            for (let i = 0; i < satArray.length; i++) {
-                const [lon, lat, altKm, name] = satArray[i];
-                const targetCartesian = Cesium.Cartesian3.fromDegrees(lon, lat, altKm * 1000);
-                const pt = pointCollection.get(i);
-
-                pt.show = true;
-                const style = getSatelliteStyle(name);
-                pt.pixelSize = style.size;
-                pt.color = style.color;
-                pt.outlineColor = style.outline;
-                pt.outlineWidth = style.outlineWidth;
-
-                if (!satStates[i]) {
-                    satStates[i] = {
-                        currentPos: targetCartesian.clone(),
-                        targetPos: targetCartesian.clone()
-                    };
-                } else {
-                    satStates[i].targetPos = targetCartesian;
+            if (frame.names) {
+                satNames = frame.names;
+                pointCollection.removeAll();
+                for (let i = 0; i < satNames.length; i++) {
+                    const style = getSatelliteStyle(satNames[i]);
+                    pointCollection.add({
+                        pixelSize: style.size,
+                        color: style.color,
+                        outlineColor: style.outline,
+                        outlineWidth: style.outlineWidth,
+                        show: false,
+                        id: { name: satNames[i] || `SATELLITE #${i + 1}`, alt: 0, massKg: style.mass }
+                    });
                 }
-
-                pt.id = {
-                    name: name || `SATELLITE #${i+1}`,
-                    alt: altKm,
-                    massKg: style.mass
-                };
             }
+
+            const n = Math.min(sats.length, pointCollection.length);
+            const p0 = new Float64Array(n * 3);
+            const p1 = new Float64Array(n * 3);
+            const valid = new Uint8Array(n);
+            let activeCount = 0;
+            for (let i = 0; i < n; i++) {
+                const s = sats[i];
+                const pt = pointCollection.get(i);
+                if (!s) {
+                    pt.show = false;
+                    continue;
+                }
+                const c0 = Cesium.Cartesian3.fromDegrees(s[0], s[1], s[2] * 1000, undefined, scratchPos);
+                p0[i * 3] = c0.x; p0[i * 3 + 1] = c0.y; p0[i * 3 + 2] = c0.z;
+                const c1 = Cesium.Cartesian3.fromDegrees(s[3], s[4], s[5] * 1000, undefined, scratchPos);
+                p1[i * 3] = c1.x; p1[i * 3 + 1] = c1.y; p1[i * 3 + 2] = c1.z;
+                valid[i] = 1;
+                pt.show = true;
+                pt.id.alt = s[2].toFixed(2);
+                activeCount++;
+            }
+            satFrame = {
+                t0: Cesium.JulianDate.fromIso8601(frame.t0),
+                t1: Cesium.JulianDate.fromIso8601(frame.t1),
+                p0, p1, valid
+            };
+            document.getElementById('activeCount').innerText = activeCount.toLocaleString();
         };
     }
 
@@ -749,19 +843,19 @@
                 tooltip.style.left = (movement.endPosition.x + 15) + 'px';
                 tooltip.style.top = (movement.endPosition.y + 15) + 'px';
                 tooltip.innerHTML = `
-                    📍 <strong>${st.name}</strong><br>
-                    🌐 Latitude: <span style="color:#38bdf8">${st.lat}°</span><br>
-                    🗺️ Longitude: <span style="color:#38bdf8">${st.lon}°</span><br>
-                    ⛰️ Altitude: <span style="color:#22c55e">${st.altMeters} m (${kmAlt} km)</span>
+                    📍 <strong>${escapeHtml(st.name)}</strong><br>
+                    🌐 Latitude: <span style="color:#38bdf8">${escapeHtml(st.lat)}°</span><br>
+                    🗺️ Longitude: <span style="color:#38bdf8">${escapeHtml(st.lon)}°</span><br>
+                    ⛰️ Altitude: <span style="color:#22c55e">${escapeHtml(st.altMeters)} m (${kmAlt} km)</span>
                 `;
             } else if (data.massKg !== undefined) {
                 tooltip.style.display = 'block';
                 tooltip.style.left = (movement.endPosition.x + 15) + 'px';
                 tooltip.style.top = (movement.endPosition.y + 15) + 'px';
                 tooltip.innerHTML = `
-                    🛰️ <strong>${data.name}</strong><br>
-                    ⚖️ Weight: <span style="color:#22c55e">${data.massKg}</span><br>
-                    📏 Altitude: ${data.alt} km
+                    🛰️ <strong>${escapeHtml(data.name)}</strong><br>
+                    ⚖️ Weight: <span style="color:#22c55e">${escapeHtml(data.massKg)}</span><br>
+                    📏 Altitude: ${escapeHtml(data.alt)} km
                 `;
             } else {
                 tooltip.style.display = 'none';
