@@ -1,6 +1,6 @@
 # 🛰️ locaSAT: Global LEO Satellite Tracker & Ground Control Station
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11-38bdf8.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-00a393.svg)
 
@@ -19,11 +19,12 @@ A highly responsive, real-time 3D Space Domain Awareness (SDA) platform designed
 * **3D WebGL Globe:** Powered by CesiumJS for seamless, hardware-accelerated Earth visualization.
 * **Custom Ground Stations:** View satellites relative to major observatories such as DAG (3170m) and TÜBİTAK TUG (2500m), or input manual latitude/longitude coordinates.
 * **Live GPS Integration:** Automatically locks the ground station to your current physical location via browser Geolocation API.
-* **Glassmorphism UI:** A sleek, modern command panel with a dynamic "Fleet Info Card" displaying operator details, orbital speeds (~27,000 km/s), altitudes, and communication bands.
+* **Glassmorphism UI:** A sleek, modern command panel with a dynamic "Fleet Info Card" displaying operator details, orbital speeds (~27,000 km/h), altitudes, and communication bands.
 * **Map Layers:** Switch between Real-Time Satellite Imagery, ESRI Dark, and CartoDB Dark Matter themes.
 
 ### ⚡ Real-Time Data Streaming
-* **WebSocket Architecture:** Telemetry data is streamed asynchronously from the FastAPI backend to the frontend every 1.0 second.
+* **WebSocket Architecture:** Telemetry is streamed from the FastAPI backend at 4-5 Hz. Each frame carries positions at two instants (`t0`, `t1`) and the browser interpolates by its own simulation clock, so fast-forward, rewind and pause stay smooth and accurate at any speed.
+* **Vectorized SGP4:** Whole constellations (10,000+ objects) are propagated in a single vectorized SGP4 call off the event loop.
 * **Data Validation:** Strict schema enforcement using Pydantic models for live telemetry and pass predictions (`LiveSatelliteTelemetry`, `PassPrediction`).
 
 ---
@@ -108,16 +109,29 @@ Yields (`LiveSatelliteTelemetry`):
 
 ### `WS /ws/constellation/{group_name}`
 
-Streams compact coordinate arrays for entire constellations to optimize frontend rendering performance. Supported groups: `starlink`, `oneweb`, `iridium-NEXT`, `planet`, `stations`, `active`.
-
-**Yields:**
+Streams compact position frames for entire constellations. Supported groups: `starlink`, `oneweb`, `iridium-NEXT`, `planet`, `stations`, `leo`, `meo`, `geo`, `all`.
+`names` is sent only in the first frame; `sats[i]` is `[lon0, lat0, alt0_km, lon1, lat1, alt1_km]` (or `null` if propagation failed) and matches `names[i]`.
 
 ```json
-[
-  [ -120.4532, 45.1234, 550.2, "STARLINK-1234" ],
-  [ 45.1234, -12.3456, 549.8, "STARLINK-5678" ]
-]
+{
+  "t0": "2026-07-23T10:00:00.000Z",
+  "t1": "2026-07-23T10:01:00.000Z",
+  "names": ["STARLINK-1234", "STARLINK-5678"],
+  "sats": [[-120.4532, 45.1234, 550.2, -118.9, 47.1, 550.3], null]
+}
 ```
+
+### Client → Server messages (both endpoints)
+
+Send JSON at any time to control the simulation clock and ground station:
+
+```json
+{ "sim_time": "2026-07-23T10:00:00.000Z", "rate": -240, "paused": false }
+{ "sim_time": null }
+{ "station": { "lat": 39.7788, "lon": 41.2281, "alt_m": 3170 } }
+```
+
+`sim_time: null` returns to live time. The single-satellite stream also includes a `next` position (at `t1`) and azimuth/elevation/range relative to the selected station.
 
 ---
 
