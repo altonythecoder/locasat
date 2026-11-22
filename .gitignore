@@ -16,3 +16,5 @@ ENV/
 .idea/
 .DS_Store
 Thumbs.db
+# TLE Önbelleği
+tle_backup/
